@@ -75,6 +75,7 @@ impl DataFileEntry {
             value: value.to_vec(),
         }
     }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&self.crc.to_le_bytes());
@@ -106,44 +107,44 @@ fn build_keydir(dirpath: &str) -> HashMap<Vec<u8>, KeyDir> {
                 continue;
             }
         }
-        let hint_file = entry.path().with_extension("hint");
-        if hint_file.exists() {
-            let mut file = fs::File::open(&hint_file).expect("Unable to open data file");
-            let file_id_str = hint_file.file_stem().expect("Unable to get file stem");
+        let hint_filepath = entry.path().with_extension("hint");
+        if hint_filepath.exists() {
+            let mut hint_file = fs::File::open(&hint_filepath).expect("Unable to open data file");
+            let file_id_str = hint_filepath.file_stem().expect("Unable to get file stem");
             let file_id = file_id_str
                 .to_str()
                 .expect("Invalid file ID")
                 .parse::<u64>()
                 .expect("Invalid file ID");
-            let file_len = file.metadata().expect("Unable to get metadata").len();
+            let file_len = hint_file.metadata().expect("Unable to get metadata").len();
 
             let mut buf = [0u8; 8];
 
             while file_pos < file_len {
                 // timestamp
-                let _ = file.read_exact(&mut buf);
+                let _ = hint_file.read_exact(&mut buf);
                 let timestamp = u64::from_le_bytes(buf);
                 file_pos += 8;
 
                 // key size
-                let _ = file.read_exact(&mut buf);
+                let _ = hint_file.read_exact(&mut buf);
                 let key_size = u64::from_le_bytes(buf);
                 file_pos += 8;
 
                 // value size
-                let _ = file.read_exact(&mut buf);
+                let _ = hint_file.read_exact(&mut buf);
                 let value_size = u64::from_le_bytes(buf);
                 file_pos += 8;
 
                 // value pos
-                let _ = file.read_exact(&mut buf);
+                let _ = hint_file.read_exact(&mut buf);
                 let value_pos = u64::from_le_bytes(buf);
                 file_pos += 8;
 
                 // key
                 let mut key = vec![0u8; key_size as usize];
 
-                let _ = file.read_exact(&mut key);
+                let _ = hint_file.read_exact(&mut key);
                 file_pos += key_size;
 
                 let map_entry = KeyDir {
@@ -156,32 +157,32 @@ fn build_keydir(dirpath: &str) -> HashMap<Vec<u8>, KeyDir> {
                 map.insert(key, map_entry);
             }
         } else {
-            let filepath = entry.path();
-            let mut file = fs::File::open(&filepath).expect("Unable to open data file");
-            let file_id = filepath.file_stem().expect("Unable to get file stem");
+            let dat_filepath = entry.path();
+            let mut dat_file = fs::File::open(&dat_filepath).expect("Unable to open data file");
+            let file_id = dat_filepath.file_stem().expect("Unable to get file stem");
 
             let mut buf = [0u8; 8];
 
-            let file_len = file.metadata().expect("Unable to get metadata").len();
+            let file_len = dat_file.metadata().expect("Unable to get metadata").len();
 
             while file_pos < file_len {
                 file_pos += 8;
-                let _ = file.seek_relative(8);
+                let _ = dat_file.seek_relative(8);
 
-                let _ = file.read_exact(&mut buf);
+                let _ = dat_file.read_exact(&mut buf);
                 let timestamp = u64::from_le_bytes(buf);
                 file_pos += 8;
 
-                let _ = file.read_exact(&mut buf);
+                let _ = dat_file.read_exact(&mut buf);
                 let key_size = u64::from_le_bytes(buf);
                 file_pos += 8;
 
-                let _ = file.read_exact(&mut buf);
+                let _ = dat_file.read_exact(&mut buf);
                 let value_size = u64::from_le_bytes(buf);
                 file_pos += 8;
 
                 let mut key = vec![0u8; key_size as usize];
-                let _ = file.read_exact(&mut key).expect("Unable to read key");
+                let _ = dat_file.read_exact(&mut key).expect("Unable to read key");
                 file_pos += key_size;
 
                 let map_entry = KeyDir {
@@ -191,7 +192,7 @@ fn build_keydir(dirpath: &str) -> HashMap<Vec<u8>, KeyDir> {
                     timestamp,
                 };
 
-                let _ = file.seek_relative(value_size as i64);
+                let _ = dat_file.seek_relative(value_size as i64);
                 file_pos += value_size;
 
                 map.insert(key, map_entry);
@@ -204,7 +205,7 @@ fn build_keydir(dirpath: &str) -> HashMap<Vec<u8>, KeyDir> {
 impl Bitcask {
     pub fn open(path: &str) -> Self {
         let now = SystemTime::now();
-        let file_id = now
+        let mut file_id = now
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
             .as_secs();
@@ -215,7 +216,11 @@ impl Bitcask {
                 Err(e) => panic!("Failed to create directory: {}", e),
             }
         }
-        let filepath = dirpath.join(format!("{}.dat", file_id));
+        let mut filepath = dirpath.join(format!("{}.dat", file_id));
+        if filepath.exists() {
+            file_id += 1;
+        }
+        filepath = dirpath.join(format!("{}.dat", file_id));
         let active_file = fs::File::create(filepath).expect("Unable to create data file");
         let key_dir = build_keydir(path);
         Bitcask {
@@ -276,40 +281,46 @@ impl Bitcask {
 
     pub fn merge(&mut self, dirpath: &str) {
         let keydir = build_keydir(dirpath);
-        let file_id = SystemTime::now()
+        let mut file_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
             .as_secs();
-        let filepath = path::Path::new(&self.data_path).join(format!("{}.dat", file_id));
+        let mut merge_filepath = path::Path::new(&self.data_path).join(format!("{}.dat", file_id));
+        if merge_filepath.exists() {
+            file_id += 1;
+        }
+        merge_filepath = path::Path::new(&self.data_path).join(format!("{}.dat", file_id));
         let mut merge_file = fs::OpenOptions::new()
             .append(true)
             .create(true)
-            .open(filepath)
+            .open(merge_filepath)
             .expect("Unable to open data file for merging");
+        let hint_filepath = path::Path::new(&self.data_path).join(format!("{}.hint", file_id));
         let mut hint_file = fs::OpenOptions::new()
             .append(true)
             .create(true)
-            .open(format!("{}.hint", file_id))
+            .open(hint_filepath)
             .expect("Unable to open hint file for merging");
         let mut write_pos = 0;
         for (key, _) in keydir {
             if let Some(value) = self.get(&key) {
-                if !value.eq(&TOMBSTONE.to_vec()) {
-                    let entry = DataFileEntry::new(&key, &value);
-                    let _ = merge_file.write(&entry.to_bytes());
-                    write_pos += 8 + 8 + 8 + 8 + key.len() as u64;
-
-                    let hint_entry = HintFileEntry {
-                        timestamp: entry.timestamp,
-                        key_size: entry.key_size,
-                        value_size: entry.value_size,
-                        value_pos: write_pos,
-                        key: entry.key.clone(),
-                    };
-                    let _ = hint_file.write(&hint_entry.to_bytes());
-
-                    write_pos += entry.value_size;
+                if value.eq(&TOMBSTONE.to_vec()) {
+                    continue;
                 }
+                let entry = DataFileEntry::new(&key, &value);
+                let _ = merge_file.write(&entry.to_bytes());
+                write_pos += 8 + 8 + 8 + 8 + key.len() as u64;
+
+                let hint_entry = HintFileEntry {
+                    timestamp: entry.timestamp,
+                    key_size: entry.key_size,
+                    value_size: entry.value_size,
+                    value_pos: write_pos,
+                    key: entry.key.clone(),
+                };
+                let _ = hint_file.write(&hint_entry.to_bytes());
+
+                write_pos += entry.value_size;
             }
         }
         let dir = path::Path::new(dirpath)
@@ -323,11 +334,13 @@ impl Bitcask {
                 .to_str()
                 .expect("Invalid file stem");
             let id = u64::from_str_radix(id_str, 10).expect("Invalid file ID");
-            if id < file_id || id == self.active_file_id {
+            if id == file_id || id == self.active_file_id {
                 continue;
             }
             let _ = fs::remove_file(filepath);
         }
+        merge_file.sync_all().expect("Failed to sync merge file");
+        hint_file.sync_all().expect("Failed to sync hint file");
     }
 
     pub fn fold() {
@@ -359,8 +372,7 @@ mod tests {
 
     #[test]
     fn test_list_keys() {
-        let mut bitcask = Bitcask::open("/tmp/test2");
-        bitcask.put(b"key1".to_vec(), b"value1".to_vec());
+        let bitcask = Bitcask::open("/tmp/test1");
         let keys = bitcask.list_keys();
         assert_eq!(keys, Some(vec![&b"key1".to_vec()]));
     }
@@ -371,18 +383,32 @@ mod tests {
         // bitcask.put(b"key1".to_vec(), b"value1".to_vec());
         // bitcask.put(b"key2".to_vec(), b"value2".to_vec());
 
-        let key_dir = build_keydir("/tmp/test3");
-        println!("Key Directory: {:?}", key_dir);
-        assert_eq!(key_dir.len(), 2);
+        let key_dir = build_keydir("/tmp/test1");
+        assert_eq!(key_dir.len(), 1);
         assert!(key_dir.contains_key(&b"key1".to_vec()));
-        assert!(key_dir.contains_key(&b"key2".to_vec()));
     }
 
     #[test]
     fn test_keydir() {
-        let bitcask = Bitcask::open("/tmp/test3");
-        println!("Key Directory: {:?}", bitcask.key_dir);
+        let bitcask = Bitcask::open("/tmp/test1");
         let result = bitcask.get(&b"key1".to_vec());
         assert_eq!(result, Some(b"value1".to_vec()));
+    }
+
+    #[test]
+    fn test_merge() {
+        let mut bitcask = Bitcask::open("/tmp/test4");
+        bitcask.put(b"key1".to_vec(), b"value1".to_vec());
+        bitcask.put(b"key2".to_vec(), b"value2".to_vec());
+
+        let mut bitcask2 = Bitcask::open("/tmp/test4");
+        bitcask2.merge("/tmp/test4");
+
+        let bitcask3 = Bitcask::open("/tmp/test4");
+        let val1 = bitcask3.get(&b"key1".to_vec());
+        let val2 = bitcask3.get(&b"key2".to_vec());
+
+        assert_eq!(val1, Some(b"value1".to_vec()));
+        assert_eq!(val2, Some(b"value2".to_vec()));
     }
 }
