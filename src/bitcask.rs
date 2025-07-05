@@ -360,6 +360,8 @@ impl Bitcask {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
@@ -408,6 +410,13 @@ mod tests {
         let val1 = bitcask3.get(&b"key1".to_vec());
         let val2 = bitcask3.get(&b"key2".to_vec());
 
+        let mut files = HashSet::new();
+
+        bitcask3.key_dir.into_iter().for_each(|(_, v)| {
+            files.insert(v.file_id);
+        });
+
+        assert_eq!(files.len(), 1);
         assert_eq!(val1, Some(b"value1".to_vec()));
         assert_eq!(val2, Some(b"value2".to_vec()));
     }
