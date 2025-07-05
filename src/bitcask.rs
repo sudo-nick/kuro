@@ -67,7 +67,7 @@ impl DataFileEntry {
         let key_size = key.len() as u64;
         let value_size = value.len() as u64;
         DataFileEntry {
-            crc,
+            crc, // TODO: Calculate CRC
             timestamp,
             key_size,
             value_size,
@@ -108,7 +108,6 @@ fn build_keydir(dirpath: &str) -> HashMap<Vec<u8>, KeyDir> {
         }
         let hint_file = entry.path().with_extension("hint");
         if hint_file.exists() {
-            // TODO: Read hint file
             let mut file = fs::File::open(&hint_file).expect("Unable to open data file");
             let file_id_str = hint_file.file_stem().expect("Unable to get file stem");
             let file_id = file_id_str
