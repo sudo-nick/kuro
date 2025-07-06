@@ -1,9 +1,9 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{Read, Seek, Write},
     os::unix::fs::FileExt,
-    path,
+    path::{self, Path},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -88,6 +88,29 @@ impl DataFileEntry {
     }
 }
 
+fn gen_file_id(dirpath: &str) -> u64 {
+    let dir = path::Path::new(dirpath)
+        .read_dir()
+        .expect("Unable to read directory");
+    let mut max_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs();
+    for entry in dir {
+        let entry = entry.expect("Unable to read entry");
+        if let Some(file_id) = get_file_id(&entry.path()) {
+            if file_id > max_id {
+                max_id = file_id;
+            }
+        }
+    }
+    max_id + 1
+}
+
+fn get_file_id(filepath: &Path) -> Option<u64> {
+    filepath.file_stem()?.to_str()?.parse::<u64>().ok()
+}
+
 fn build_keydir(dirpath: &str) -> HashMap<Vec<u8>, KeyDir> {
     let mut map = HashMap::new();
     let dir = path::Path::new(dirpath);
@@ -95,29 +118,41 @@ fn build_keydir(dirpath: &str) -> HashMap<Vec<u8>, KeyDir> {
         println!("Directory does not exist: {}", dirpath);
         return map;
     }
-    for entry in dir
+    let entries = dir
         .to_path_buf()
         .read_dir()
-        .expect("Unable to read directory")
-    {
+        .expect("Unable to read directory");
+    let mut sorted_entries = entries
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("Unable to collect entries");
+    sorted_entries.sort_by(|a, b| {
+        let a_id = get_file_id(&a.path());
+        let b_id = get_file_id(&b.path());
+        a_id.cmp(&b_id)
+    });
+    let mut processed: HashSet<u64> = HashSet::new();
+    for entry in sorted_entries {
         let mut file_pos = 0;
-        let entry = entry.expect("Unable to read entry");
         if let Some(extension) = entry.path().extension() {
             if extension != "dat" {
                 continue;
             }
         }
+        let file_id = match get_file_id(&entry.path()) {
+            Some(id) => id,
+            None => {
+                continue;
+            }
+        };
+        if processed.contains(&file_id) {
+            continue;
+        }
+        processed.insert(file_id);
         let hint_filepath = entry.path().with_extension("hint");
         if hint_filepath.exists() {
             let mut hint_file = fs::File::open(&hint_filepath).expect("Unable to open data file");
-            let file_id_str = hint_filepath.file_stem().expect("Unable to get file stem");
-            let file_id = file_id_str
-                .to_str()
-                .expect("Invalid file ID")
-                .parse::<u64>()
-                .expect("Invalid file ID");
             let file_len = hint_file.metadata().expect("Unable to get metadata").len();
-
             let mut buf = [0u8; 8];
 
             while file_pos < file_len {
@@ -157,15 +192,13 @@ fn build_keydir(dirpath: &str) -> HashMap<Vec<u8>, KeyDir> {
                 map.insert(key, map_entry);
             }
         } else {
-            let dat_filepath = entry.path();
-            let mut dat_file = fs::File::open(&dat_filepath).expect("Unable to open data file");
-            let file_id = dat_filepath.file_stem().expect("Unable to get file stem");
-
+            let mut dat_file = fs::File::open(&entry.path()).expect("Unable to open data file");
             let mut buf = [0u8; 8];
 
             let file_len = dat_file.metadata().expect("Unable to get metadata").len();
 
             while file_pos < file_len {
+                // Skip CRC for now!
                 file_pos += 8;
                 let _ = dat_file.seek_relative(8);
 
@@ -186,7 +219,7 @@ fn build_keydir(dirpath: &str) -> HashMap<Vec<u8>, KeyDir> {
                 file_pos += key_size;
 
                 let map_entry = KeyDir {
-                    file_id: file_id.to_str().unwrap().parse().expect("Invalid file ID"),
+                    file_id,
                     value_size,
                     value_pos: file_pos,
                     timestamp,
@@ -204,11 +237,7 @@ fn build_keydir(dirpath: &str) -> HashMap<Vec<u8>, KeyDir> {
 
 impl Bitcask {
     pub fn open(path: &str) -> Self {
-        let now = SystemTime::now();
-        let mut file_id = now
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_secs();
+        let file_id = gen_file_id(path);
         let dirpath = path::Path::new(path);
         if !dirpath.exists() {
             match fs::create_dir(path) {
@@ -216,12 +245,12 @@ impl Bitcask {
                 Err(e) => panic!("Failed to create directory: {}", e),
             }
         }
-        let mut filepath = dirpath.join(format!("{}.dat", file_id));
-        if filepath.exists() {
-            file_id += 1;
-        }
-        filepath = dirpath.join(format!("{}.dat", file_id));
-        let active_file = fs::File::create(filepath).expect("Unable to create data file");
+        let filepath = dirpath.join(format!("{}.dat", file_id));
+        let active_file = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(filepath)
+            .expect("Unable to create data file");
         let key_dir = build_keydir(path);
         Bitcask {
             key_dir,
@@ -239,10 +268,6 @@ impl Bitcask {
                 let dirpath = path::Path::new(&self.data_path);
                 let filepath = dirpath.join(format!("{}.dat", kd.file_id));
                 let data_file = fs::File::open(filepath).expect("Unable to open data file");
-                print!(
-                    "Reading from file: {} at position: {} of size {}",
-                    kd.file_id, kd.value_pos, kd.value_size
-                );
                 let mut buf = vec![0u8; kd.value_size as usize];
                 data_file
                     .read_exact_at(&mut buf, kd.value_pos)
@@ -263,11 +288,10 @@ impl Bitcask {
             value_pos,
             timestamp: entry.timestamp,
         };
-        let _ = self
-            .active_file
-            .write_at(&entry.to_bytes(), self.writer_pos);
+        let data = entry.to_bytes();
+        let _ = self.active_file.write(&data);
         // FORMAT: CRC + TMSTMP + KEY_SIZE + VALUE_SIZE + KEY + VALUE
-        self.writer_pos += 8 + 8 + 8 + 8 + key.len() as u64 + value.len() as u64;
+        self.writer_pos += data.len() as u64;
         self.key_dir.insert(key, kd_value);
     }
 
@@ -302,25 +326,27 @@ impl Bitcask {
             .open(hint_filepath)
             .expect("Unable to open hint file for merging");
         let mut write_pos = 0;
-        for (key, _) in keydir {
+        let tombstone = TOMBSTONE.to_vec();
+        for (key, _) in &keydir {
             if let Some(value) = self.get(&key) {
-                if value.eq(&TOMBSTONE.to_vec()) {
+                if value.eq(&tombstone) {
                     continue;
                 }
                 let entry = DataFileEntry::new(&key, &value);
-                let _ = merge_file.write(&entry.to_bytes());
-                write_pos += 8 + 8 + 8 + 8 + key.len() as u64;
+                let data = entry.to_bytes();
+                let _ = merge_file.write(&data);
+                let value_pos = write_pos + 8 + 8 + 8 + 8 + key.len() as u64;
 
                 let hint_entry = HintFileEntry {
                     timestamp: entry.timestamp,
                     key_size: entry.key_size,
                     value_size: entry.value_size,
-                    value_pos: write_pos,
-                    key: entry.key.clone(),
+                    value_pos,
+                    key: entry.key,
                 };
                 let _ = hint_file.write(&hint_entry.to_bytes());
 
-                write_pos += entry.value_size;
+                write_pos += data.len() as u64;
             }
         }
         let dir = path::Path::new(dirpath)
@@ -328,12 +354,12 @@ impl Bitcask {
             .expect("Unable to read directory");
         for file in dir {
             let filepath = file.expect("Unable to read file").path();
-            let id_str = filepath
-                .file_stem()
-                .expect("Unable to get file stem")
-                .to_str()
-                .expect("Invalid file stem");
-            let id = u64::from_str_radix(id_str, 10).expect("Invalid file ID");
+            let id = match get_file_id(&filepath) {
+                Some(id) => id,
+                None => {
+                    continue;
+                }
+            };
             if id == file_id || id == self.active_file_id {
                 continue;
             }
@@ -341,6 +367,10 @@ impl Bitcask {
         }
         merge_file.sync_all().expect("Failed to sync merge file");
         hint_file.sync_all().expect("Failed to sync hint file");
+        self.active_file = merge_file;
+        self.active_file_id = file_id;
+        self.writer_pos = write_pos;
+        self.key_dir = keydir;
     }
 
     pub fn fold() {
@@ -412,7 +442,7 @@ mod tests {
 
         let mut files = HashSet::new();
 
-        bitcask3.key_dir.into_iter().for_each(|(_, v)| {
+        bitcask3.key_dir.iter().for_each(|(_, v)| {
             files.insert(v.file_id);
         });
 
