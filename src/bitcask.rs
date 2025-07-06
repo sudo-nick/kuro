@@ -58,7 +58,7 @@ struct DataFileEntry {
 }
 
 impl DataFileEntry {
-    pub fn new(key: &Vec<u8>, value: &Vec<u8>) -> Self {
+    pub fn new(key: Vec<u8>, value: Vec<u8>) -> Self {
         let crc = 0;
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -71,8 +71,8 @@ impl DataFileEntry {
             timestamp,
             key_size,
             value_size,
-            key: key.to_vec(),
-            value: value.to_vec(),
+            key,
+            value,
         }
     }
 
@@ -89,6 +89,7 @@ impl DataFileEntry {
 }
 
 fn gen_file_id(dirpath: &str) -> u64 {
+    fs::create_dir_all(dirpath).expect("Failed to create directory");
     let dir = path::Path::new(dirpath)
         .read_dir()
         .expect("Unable to read directory");
@@ -279,12 +280,14 @@ impl Bitcask {
     }
 
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
-        let entry = DataFileEntry::new(&key, &value);
+        let key_size = key.len() as u64;
+        let value_size = value.len() as u64;
+        let entry = DataFileEntry::new(key.to_vec(), value);
         //  FORMAT: CRC + TMSTMP + KEY_SIZE + VALUE_SIZE + KEY
-        let value_pos = self.writer_pos + 8 + 8 + 8 + 8 + key.len() as u64;
+        let value_pos = self.writer_pos + 8 + 8 + 8 + 8 + key_size;
         let kd_value = KeyDir {
             file_id: self.active_file_id,
-            value_size: value.len() as u64,
+            value_size,
             value_pos,
             timestamp: entry.timestamp,
         };
@@ -332,10 +335,11 @@ impl Bitcask {
                 if value.eq(&tombstone) {
                     continue;
                 }
-                let entry = DataFileEntry::new(&key, &value);
+                let key_len = key.len() as u64;
+                let entry = DataFileEntry::new(key.to_vec(), value);
                 let data = entry.to_bytes();
                 let _ = merge_file.write(&data);
-                let value_pos = write_pos + 8 + 8 + 8 + 8 + key.len() as u64;
+                let value_pos = write_pos + 8 + 8 + 8 + 8 + key_len;
 
                 let hint_entry = HintFileEntry {
                     timestamp: entry.timestamp,
