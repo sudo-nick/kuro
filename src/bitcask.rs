@@ -248,17 +248,13 @@ impl Bitcask {
         let path: &Path = path.as_ref();
         let file_id = gen_file_id(path)?;
         if !path.exists() {
-            match fs::create_dir(path) {
-                Ok(_) => println!("Created directory: {:?}", path),
-                Err(e) => panic!("Failed to create directory: {}", e),
-            }
+            let _ = fs::create_dir(path)?;
         }
         let filepath = path.join(format!("{}.dat", file_id));
         let active_file = fs::OpenOptions::new()
             .append(true)
             .create(true)
-            .open(filepath)
-            .expect("Unable to create data file");
+            .open(filepath)?;
         let key_dir = build_keydir(path)?;
         Ok(Bitcask {
             key_dir,
@@ -277,9 +273,7 @@ impl Bitcask {
                 let filepath = dirpath.join(format!("{}.dat", kd.file_id));
                 let data_file = fs::File::open(filepath)?;
                 let mut buf = vec![0u8; kd.value_size as usize];
-                data_file
-                    .read_exact_at(&mut buf, kd.value_pos)
-                    .expect("Unable to read data file");
+                data_file.read_exact_at(&mut buf, kd.value_pos)?;
                 return Ok(buf);
             }
             None => Err(BitcaskError::KeyNotFound),
@@ -361,7 +355,7 @@ impl Bitcask {
         let dirpath: &Path = dirpath.as_ref();
         let dir = dirpath.read_dir()?;
         for file in dir {
-            let filepath = file.expect("Unable to read file").path();
+            let filepath = file?.path();
             let id = match get_file_id(&filepath) {
                 Some(id) => id,
                 None => {
@@ -373,8 +367,8 @@ impl Bitcask {
             }
             let _ = fs::remove_file(filepath);
         }
-        merge_file.sync_all().expect("Failed to sync merge file");
-        hint_file.sync_all().expect("Failed to sync hint file");
+        merge_file.sync_all()?;
+        hint_file.sync_all()?;
         self.active_file = merge_file;
         self.active_file_id = file_id;
         self.writer_pos = write_pos;
@@ -386,10 +380,9 @@ impl Bitcask {
         panic!("Sync operation not implemented yet");
     }
 
-    pub fn sync(&mut self) {
-        self.active_file
-            .sync_all()
-            .expect("Failed to sync active file");
+    pub fn sync(&mut self) -> Result<(), BitcaskError> {
+        self.active_file.sync_all()?;
+        return Ok(());
     }
 
     pub fn close(self) {
